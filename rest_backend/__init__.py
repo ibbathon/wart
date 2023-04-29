@@ -29,7 +29,7 @@ def create_app(test_config=None):
         SECRET_KEY=secret,
         JWT_SECRET=jwt_secret,
         JWT_SECURE=app.config['ENV'] != 'development',
-        DATABASE_URI='wart_mongo_1',
+        DATABASE_URI='wart_mongo',
         DATABASE_PORT=27017,
         GOOGLE_AUTH_CLIENT=os.getenv('GOOGLE_AUTH_CLIENT'),
         MAX_COOKIE_AGE=7 * 24*60*60, # stay for 7 days 

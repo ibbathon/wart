@@ -1,18 +1,17 @@
 "use strict";
 // Imports
+require('dotenv').config()
 const MongoClient = require('mongodb').MongoClient;
-const assert = require('assert');
-const deepEqual = require('deep-equal');
 const request = require('request');
+const fs = require('fs');
 const parse = require('node-html-parser').parse;
 
 // Official drop tables
 const dropTablesURL = 'https://n8k6e2y6.ssl.hwcdn.net/repos/hnfvc0o3jnfvc873njb03enrf56.html';
 
 // MongoDB setup
-const url = 'mongodb://wart_mongo_1:27017';
+const url = process.env.DB_URL || 'mongodb://wart_mongo:27017';
 const client = new MongoClient(url, {useNewUrlParser: true});
-const dbName = 'wart';
 const primesCollection = 'primes';
 const relicsCollection = 'relics';
 
@@ -29,104 +28,87 @@ let relicsFound = {}
  * and calls all the methods to gather data from that text into the DB.
  * Finally outputs stats.
  */
-function driver() {
+async function driver() {
   // Set up Mongo connection
-  client.connect(function(err) {
-    assert.equal(null, err);
+  console.log("Connecting to " + url);
+  try {
+    await client.connect();
     console.log("Connected to Mongo successfully");
 
     let db = client.db('wart');
 
     // Gather drop table data
-    downloadPage(dropTablesURL)
-    .then(result => {
-      const parsedHTML = parse(result);
-      const bodyChildren = parsedHTML.childNodes[0].childNodes[1].childNodes;
+    const rawHTML = await downloadPage(dropTablesURL);
+    //await writePage('./droptables.html', rawHTML);
+    //const rawHTML = await loadPage('./droptables.html');
+    const parsedHTML = parse(rawHTML);
 
-      // Find the relic rewards tables
-      let relicTable;
-      for (const i in bodyChildren) {
-        if (bodyChildren[i].id === 'relicRewards') {
-          relicTable = bodyChildren[parseInt(i)+1].childNodes;
-          break;
-        }
+    // The weird selection method for finding the rows of the tables is due
+    // to the terrible HTML of the source, which conflicts with W3C standards
+    // that result from downloading the page in a browser.
+    const relicRewardsHeader = parsedHTML.querySelector('#relicRewards');
+    const relicTable = relicRewardsHeader.nextElementSibling.querySelector('tr').parentNode.childNodes;
+    const missionRewardsHeader = parsedHTML.querySelector('#missionRewards');
+    const missionTable = missionRewardsHeader.nextElementSibling.querySelector('tr').parentNode.childNodes;
+
+    console.log("Gathered tables from official data");
+
+    // Use both tables to create the objects and put them in the DB
+    const promises = gatherDataFromOfficialTables(db, relicTable, missionTable);
+    // Wait for all the data-writing to complete
+    await Promise.all(promises);
+    console.log("Finished updating primes/relics");
+
+    // Update last_updated for prime/relic collections
+    await updateLastUpdated(db);
+
+    // Calculate and output stats
+    let counter = {
+      primesTotal: 0,
+      primesInserted: 0,
+      primesUpdated: 0,
+      primesErrored: 0,
+      relicsTotal: 0,
+      relicsInserted: 0,
+      relicsUpdated: 0,
+      relicsErrored: 0,
+    };
+    for (const prime in primesFound) {
+      counter.primesTotal += 1;
+      if (primesFound[prime] === 'inserted') {
+        counter.primesInserted += 1;
+      } else if (primesFound[prime] === 'updated') {
+        counter.primesUpdated += 1;
+      } else if (primesFound[prime] === 'errored') {
+        counter.primesErrored += 1;
       }
-
-      // Next, we're going to find the mission drops tables
-      let missionTable;
-      for (const i in bodyChildren) {
-        if (bodyChildren[i].id === 'missionRewards') {
-          missionTable = bodyChildren[parseInt(i)+1].childNodes;
-          break;
-        }
+    }
+    for (const relic in relicsFound) {
+      counter.relicsTotal += 1;
+      if (relicsFound[relic] === 'inserted') {
+        counter.relicsInserted += 1;
+      } else if (relicsFound[relic] === 'updated') {
+        counter.relicsUpdated += 1;
+      } else if (relicsFound[relic] === 'errored') {
+        counter.relicsErrored += 1;
       }
-
-      console.log("Gathered tables from official data");
-
-      // Use both tables to create the objects and put them in the DB
-      const promises = gatherDataFromOfficialTables(
-        db, relicTable, missionTable);
-
-      // Next in the .then chain should wait for all prime/relic processing
-      return Promise.all(promises);
-    })
-    .then(results => {
-      console.log("Finished updating primes/relics");
-      // Update last_updated for prime/relic collections
-      return updateLastUpdated(db);
-    })
-    .then(results => {
-      // No more Mongo work is needed
-      client.close();
-
-      // Calculate and output stats
-      let counter = {
-        primesTotal: 0,
-        primesInserted: 0,
-        primesUpdated: 0,
-        primesErrored: 0,
-        relicsTotal: 0,
-        relicsInserted: 0,
-        relicsUpdated: 0,
-        relicsErrored: 0,
-      };
-      for (const prime in primesFound) {
-        counter.primesTotal += 1;
-        if (primesFound[prime] === 'inserted') {
-          counter.primesInserted += 1;
-        } else if (primesFound[prime] === 'updated') {
-          counter.primesUpdated += 1;
-        } else if (primesFound[prime] === 'errored') {
-          counter.primesErrored += 1;
-        }
-      }
-      for (const relic in relicsFound) {
-        counter.relicsTotal += 1;
-        if (relicsFound[relic] === 'inserted') {
-          counter.relicsInserted += 1;
-        } else if (relicsFound[relic] === 'updated') {
-          counter.relicsUpdated += 1;
-        } else if (relicsFound[relic] === 'errored') {
-          counter.relicsErrored += 1;
-        }
-      }
-      console.log("Inserted/Updated/Errored/Total");
-      console.log("Primes: "
-        +counter.primesInserted+"/"
-        +counter.primesUpdated+"/"
-        +counter.primesErrored+"/"
-        +counter.primesTotal);
-      console.log("Relics: "
-        +counter.relicsInserted+"/"
-        +counter.relicsUpdated+"/"
-        +counter.relicsErrored+"/"
-        +counter.relicsTotal);
-    })
-    .catch(error => {
-      console.log(error);
-      client.close();
-    });
-  });
+    }
+    console.log("Inserted/Updated/Errored/Total");
+    console.log("Primes: "
+      +counter.primesInserted+"/"
+      +counter.primesUpdated+"/"
+      +counter.primesErrored+"/"
+      +counter.primesTotal);
+    console.log("Relics: "
+      +counter.relicsInserted+"/"
+      +counter.relicsUpdated+"/"
+      +counter.relicsErrored+"/"
+      +counter.relicsTotal);
+  } catch (e) {
+    console.error(e);
+  } finally {
+    await client.close();
+  }
 }
 
 /**
@@ -142,6 +124,32 @@ function downloadPage(url) {
         reject('Invalid status code <' + response.statusCode + '>');
       }
       resolve(body);
+    });
+  });
+}
+
+/**
+ * Helper function to write drop table raw HTML to a file for use in loadPage.
+ */
+function writePage(file, data) {
+  return new Promise((resolve, reject) => {
+    fs.writeFile(file, data, err => {
+      if (err) reject(err);
+      resolve(null);
+    });
+  });
+}
+
+/**
+ * Helper function to temporarily replace downloadPage during rapid dev to
+ * reduce the number of requests to the Warframe drops page. Don't want to get
+ * blocked...
+ */
+function loadPage(file) {
+  return new Promise((resolve, reject) => {
+    fs.readFile(file, 'utf8', (err, data) => {
+      if (err) reject(err);
+      resolve(data);
     });
   });
 }
@@ -184,7 +192,7 @@ function gatherDataFromOfficialTables(db, relicTable, missionTable) {
 function missionTableToRelicList(missionTable) {
   let unvaultedRelics = [];
   for (const row of missionTable) {
-    if (row.childNodes[0].text.match(/Relic/)) {
+    if (row?.childNodes[0]?.text?.match(/Relic/)) {
       const relicName = row.childNodes[0].text
                         .match(/(Lith|Meso|Neo|Axi) \w*/)[0]
       if (unvaultedRelics.indexOf(relicName) === -1) {
@@ -240,48 +248,56 @@ function relicTableToLists(relicTable, unvaultedRelics) {
   // First, create the list of relics, and use a dict to track the primes,
   // so that we can make use of dict lookup speed (instead of manually finding
   // the prime each time in a list).
-  // Note that we increment by 8 because each relic's drop table occupies
-  // 8 rows in the overall table (including blank row between tables).
-  for (let i = 0; i < relicTable.length; i+=8) {
-    // First row is the header with the relic name and rarity
-    const header = relicTable[i].childNodes[0].text;
-    // We only want intact, so skip if it's not
-    if (!header.match(/(Intact)/)) {
-      continue;
-    }
-    // For now, skip Requiem relics. Adding them will take a lot of work,
-    // and their presence is currently breaking the relic-reader.
-    if (header.match(/Requiem/)) {
-      continue;
-    }
-
-    let relic = {};
-    relic.name = header.replace(/ Relic \(Intact\)/,'');
-    relic.vaulted = unvaultedRelics.indexOf(relic.name) === -1;
-    relic.rewards = [];
-    // The next 6 rows are the components dropped from the relic, and rarities
-    for (let j = 1; j <= 6; j++) {
-      let partName = relicTable[i+j].childNodes[0].text;
-      // Skip if Forma
-      if (partName === 'Forma' || partName === 'Forma Blueprint') {
-        continue;
+  // To hopefully make this version more future-proof, just look for the word
+  // "Relic" and "Common/Rare/Uncommon" in rows to determine row type.
+  // Previous version counted on a set number of rows between relics.
+  let relic = null;
+  for (let row of relicTable) {
+    if (row.rawText.match(/Relic/)) {
+      // Finding a relic is a sign that we're done processing
+      // the previous relic. So add helper attributes (era, code, etc.),
+      // then add it to the list.
+      if (relic) {
+        relics.push(processRelicName(relic));
+        relic = null;
       }
-      // Simplify the partname for the kubrow collar
+      // we're only interested in intact, non-requiem relics
+      // For now, skip Requiem relics. Adding them will take a lot of work,
+      // and their presence is currently breaking the relic-reader.
+      if (!row.rawText.match(/(Intact)/) || row.rawText.match(/Requiem/)) {
+        continue
+      }
+
+      // we found an intact relic, so construct the object
+      relic = {};
+      relic.name = row.rawText.match(/(Axi|Neo|Meso|Lith) [A-Z][0-9]{1,2}/)[0];
+      relic.vaulted = unvaultedRelics.indexOf(relic.name) === -1;
+      relic.rewards = [];
+      continue;
+    }
+    if (!relic) continue;
+
+    if (row.rawText.match(/(Common|Uncommon|Rare)/)) {
+      let partName = row.querySelector('td').text;
+      const chanceText = row.querySelector('td').nextElementSibling.text;
+      // ignore Forma for WaRT
+      if (partName === 'Forma Blueprint') continue;
+      // simplify the partname for the kubrow collar
       if (partName === 'Kavasa Prime Kubrow Collar Blueprint') {
         partName = 'Kavasa Prime Blueprint';
       }
 
-      // Add the part to the rewards list for this relic
-      const chance = relicTable[i+j].childNodes[1].text
-                     .replace(/.*\((.*)\%\)/,'$1');
+      // parse out the parts of the chance
+      const chance = chanceText.replace(/.*\(([0-9.]*)\%\)/, '$1');
       const rarity = chanceToRarity(chance);
       const ducats = rarityToNormalDucats(rarity);
+
+      // Add the part to the rewards list for this relic
       relic.rewards.push({
         name: partName,
         rarity: rarity,
         ducats: ducats,
       });
-
       // Add the part to the appropriate prime
       const primeName = partToPrimeName(partName);
       // Create the prime's dict if it doesn't exist
@@ -309,8 +325,11 @@ function relicTableToLists(relicTable, unvaultedRelics) {
       primes[primeName].components[partName].relics.push(relic.name);
     }
 
-    // The basic relic information is ready. Add helper attributes
-    // (era, code, etc.) before adding it to the list.
+    // if it's not a relic and not a part-chance, skip it
+    continue;
+  }
+  // if we have a straggler relic, push it
+  if (relic) {
     relics.push(processRelicName(relic));
   }
 
@@ -473,24 +492,22 @@ function copyRelicData(mongoObject, builtObject) {
  * TODO: It currently does this regardless of whether any primes/relics have
  *       actually been updated. Change it so it only does so if so.
  */
-function updateLastUpdated(db) {
+async function updateLastUpdated(db) {
   // Use the same last_updated time for both primes and relics.
   let updateTime = new Date();
 
-  return [
-    db.collection(primesCollection)
-      .updateOne(
-        {'last_updated': {$exists: true}},
-        {$set: {'last_updated': updateTime}},
-        {upsert: true}
-      ),
-    db.collection(relicsCollection)
-      .updateOne(
-        {'last_updated': {$exists: true}},
-        {$set: {'last_updated': updateTime}},
-        {upsert: true}
-      )
-  ]
+  await db.collection(primesCollection)
+    .updateOne(
+      {'last_updated': {$exists: true}},
+      {$set: {'last_updated': updateTime}},
+      {upsert: true}
+    )
+  await db.collection(relicsCollection)
+    .updateOne(
+      {'last_updated': {$exists: true}},
+      {$set: {'last_updated': updateTime}},
+      {upsert: true}
+    )
 }
 
 
@@ -576,4 +593,4 @@ function rarityToNormalDucats(rarity) {
 /*******************
  * Kick off driver *
  *******************/
-driver();
+driver().catch(console.error);
