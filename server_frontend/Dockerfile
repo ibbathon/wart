@@ -1,4 +1,4 @@
-FROM node:8-alpine
+FROM node:16-alpine
 
 # We want to build static files first, without using much space
 WORKDIR /server_frontend
